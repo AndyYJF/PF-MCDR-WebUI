@@ -4255,6 +4255,69 @@
           }
         }
       }
+    },
+    "/api/mods/pending": {
+      "get": {
+        "tags": [
+          "mods"
+        ],
+        "summary": "List Pending Mods",
+        "operationId": "list_pending_mods___api_mods_pending__GET",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/pending/{filename}": {
+      "delete": {
+        "tags": [
+          "mods"
+        ],
+        "summary": "Cancel Pending Mod",
+        "operationId": "cancel_pending_mod___api_mods_pending_{filename}__DELETE",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Filename"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiSuccessEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

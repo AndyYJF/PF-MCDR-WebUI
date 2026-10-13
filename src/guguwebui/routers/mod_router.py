@@ -30,7 +30,7 @@ from guguwebui.structures.envelope import ApiSuccessEnvelope, PageEnvelope, page
 
 router = APIRouter(prefix="/mods", tags=["mods"])
 
-_OPERATION_KEYS = ("server_running", "needs_restart", "effective_after", "warnings")
+_OPERATION_KEYS = ("server_running", "needs_restart", "effective_after", "warnings", "pending", "pending_action")
 
 
 def _audit(user: dict, operation_type: str, summary: str, detail: dict | None = None) -> None:
@@ -49,6 +49,7 @@ async def list_mods(request: Request, _admin: dict = Depends(get_current_admin))
         success(
             {
                 "mods": result.get("mods", []),
+                "pending_mods": result.get("pending_mods", []),
                 "server_running": result.get("server_running", False),
                 "mods_path": result.get("mods_path"),
             }
@@ -56,10 +57,26 @@ async def list_mods(request: Request, _admin: dict = Depends(get_current_admin))
     )
 
 
+@router.get("/pending", response_model=PageEnvelope)
+async def list_pending_mods(request: Request, _admin: dict = Depends(get_current_admin)):
+    result = await run_in_threadpool(request.app.state.mod_service.list_pending)
+    items = result.get("items", [])
+    return JSONResponse(page(items=items, total=len(items), offset=0, limit=len(items)))
+
+
 @router.get("/icon")
 async def mod_icon(request: Request, filename: str, _admin: dict = Depends(get_current_admin)):
     data, media_type = request.app.state.mod_service.get_icon(filename)
     return Response(content=data, media_type=media_type)
+
+
+@router.delete("/pending/{filename}", response_model=ApiSuccessEnvelope)
+async def cancel_pending_mod(request: Request, filename: str, admin: dict = Depends(get_current_admin)):
+    result = request.app.state.mod_service.cancel_pending(filename)
+    _audit(admin, "mod.pending_cancel", f"取消模组待处理状态: {filename}", {"filename": filename})
+    data: Dict[str, Any] = _operation_state(result)
+    data["filename"] = result.get("filename", filename)
+    return JSONResponse(success(data=data, message=result.get("message")))
 
 
 @router.post("/upload", response_model=ApiSuccessEnvelope)

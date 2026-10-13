@@ -24,6 +24,7 @@ except ModuleNotFoundError:  # Python 3.10
 
 from guguwebui.structures import BusinessException
 from guguwebui.utils.mc_util import get_minecraft_path
+from guguwebui.utils.storage import get_state, set_state
 
 
 _METADATA_LIMIT = 2 * 1024 * 1024
@@ -54,6 +55,60 @@ class ModService:
         self.config_service = config_service
         self._lock = threading.RLock()
         self._metadata_cache: dict[tuple[str, int, int], dict] = {}
+        # 同一内置数据库可能服务多个目标服务器，按工作目录隔离队列。
+        self._pending_namespace = f"mods:{self.working_dir()}"
+
+    def _load_pending_operations(self) -> dict[str, dict]:
+        data = get_state(self._pending_namespace, "pending_disables", {})
+        if not isinstance(data, dict):
+            return {}
+        result: dict[str, dict] = {}
+        migrated = False
+        for name, value in data.items():
+            if not isinstance(name, str):
+                continue
+            if isinstance(value, dict):
+                action = value.get("action")
+                queued_at = value.get("queued_at")
+                if action in {"disable", "delete"} and queued_at is not None:
+                    try:
+                        result[name] = {"action": action, "queued_at": int(queued_at)}
+                    except (ValueError, TypeError):
+                        continue
+            else:
+                # 兼容第一版队列格式：{filename: queued_at}，默认为禁用。
+                try:
+                    result[name] = {"action": "disable", "queued_at": int(value)}
+                    migrated = True
+                except (ValueError, TypeError):
+                    continue
+        if migrated:
+            self._save_pending_operations(result)
+        return result
+
+    def _save_pending_operations(self, pending: dict[str, dict]) -> None:
+        set_state(self._pending_namespace, "pending_disables", pending)
+
+    def _pending_entries(self) -> list[dict]:
+        with self._lock:
+            pending = self._load_pending_operations()
+            if not pending:
+                return []
+            entries = {entry["filename"]: entry for entry in self._scan_entries()}
+            result = []
+            stale = set(pending)
+            for filename, operation in pending.items():
+                entry = entries.get(filename)
+                if entry is None or (operation["action"] == "disable" and not entry.get("enabled")):
+                    continue
+                item = dict(entry)
+                item["queued_at"] = operation["queued_at"]
+                item["pending_action"] = operation["action"]
+                result.append(item)
+                stale.discard(filename)
+            if stale:
+                self._save_pending_operations({name: operation for name, operation in pending.items() if name not in stale})
+            return result
 
     def working_dir(self) -> Path:
         return Path(get_minecraft_path(self.server, "working_directory")).resolve()
@@ -480,12 +535,59 @@ class ModService:
 
     def list_mods(self) -> dict:
         entries = self._scan_entries()
+        pending_mods = self._pending_entries()
         return {
             "status": "success",
             "mods": entries,
+            "pending_mods": pending_mods,
             "server_running": self._server_running(),
             "mods_path": str(self.mods_dir()),
         }
+
+    def list_pending(self) -> dict:
+        return {"status": "success", "items": self._pending_entries()}
+
+    def apply_pending_disables(self) -> dict:
+        """在服务器停止后执行运行期间排队的禁用操作。"""
+        with self._lock:
+            pending = self._load_pending_operations()
+            applied = []
+            errors = []
+            remaining = {}
+            for filename, operation in pending.items():
+                try:
+                    source = self._mod_path(filename, must_exist=False)
+                    if not source.exists():
+                        continue
+                    if operation["action"] == "delete":
+                        self._move_to_trash(source)
+                    else:
+                        target = self._mod_path(filename + ".disabled", must_exist=False)
+                        if target.exists():
+                            applied.append(filename)
+                            continue
+                        self._rename_no_replace(source, target)
+                    applied.append(filename)
+                except Exception as exc:
+                    remaining[filename] = operation
+                    errors.append({"filename": filename, "message": str(exc)})
+            self._save_pending_operations(remaining)
+            return {"applied": applied, "errors": errors, "remaining": list(remaining)}
+
+    def cancel_pending(self, filename: str) -> dict:
+        with self._lock:
+            filename = self._validate_filename(filename)
+            pending = self._load_pending_operations()
+            if filename not in pending:
+                raise BusinessException("该模组不在待处理列表中", status_code=404)
+            pending.pop(filename, None)
+            self._save_pending_operations(pending)
+            return {
+                "status": "success",
+                "message": "已取消模组待处理状态",
+                "filename": filename,
+                "pending": False,
+            }
 
     def get_icon(self, filename: str) -> tuple[bytes, str]:
         path = self._mod_path(filename)
@@ -542,12 +644,26 @@ class ModService:
             actionable = [w for w in warnings if w.get("code") not in {"unknown_metadata"}]
             if actionable and not acknowledge_warnings:
                 raise BusinessException("操作存在兼容性警告，请确认后重试", status_code=409, data={"warnings": warnings})
+            if not enabled and self._server_running():
+                pending = self._load_pending_operations()
+                pending[source.name] = {"action": "disable", "queued_at": int(time.time())}
+                self._save_pending_operations(pending)
+                return {
+                    "status": "success",
+                    "message": "模组已加入待处理列表，将在服务器停止或重启时禁用",
+                    "filename": source.name,
+                    "pending": True,
+                    **self._operation_state(warnings),
+                }
             try:
                 self._rename_no_replace(source, target)
             except FileExistsError:
                 raise BusinessException("目标文件已存在，无法切换状态", status_code=409)
             except OSError as exc:
                 self._raise_file_operation_error(exc, "切换")
+            pending = self._load_pending_operations()
+            pending.pop(source.name, None)
+            self._save_pending_operations(pending)
             return {"status": "success", "message": "模组状态已更新", "filename": target_name, **self._operation_state(warnings)}
 
     async def upload(self, upload_file, enabled: bool, max_bytes: int, acknowledge_warnings: bool = False) -> dict:
@@ -631,36 +747,53 @@ class ModService:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
 
+    def _move_to_trash(self, source: Path) -> dict:
+        trash_id = str(uuid.uuid4())
+        destination_dir = self.trash_dir() / trash_id
+        destination_dir.mkdir(parents=True, exist_ok=False)
+        metadata = self._parse_metadata(source)
+        manifest = {
+            "id": trash_id,
+            "filename": source.name,
+            "enabled": source.name.lower().endswith(".jar"),
+            "deleted_at": int(time.time()),  # epoch 秒
+            "metadata": {k: v for k, v in metadata.items() if k != "icon_entry"},
+        }
+        try:
+            os.replace(source, destination_dir / source.name)
+            self._write_json_atomic(destination_dir / "manifest.json", manifest)
+        except Exception as exc:
+            if (destination_dir / source.name).exists() and not source.exists():
+                os.replace(destination_dir / source.name, source)
+            shutil.rmtree(destination_dir, ignore_errors=True)
+            if isinstance(exc, OSError):
+                self._raise_file_operation_error(exc, "删除")
+            raise
+        return manifest
+
     def trash(self, filename: str) -> dict:
         with self._lock:
             source = self._mod_path(filename)
-            trash_id = str(uuid.uuid4())
-            destination_dir = self.trash_dir() / trash_id
-            destination_dir.mkdir(parents=True, exist_ok=False)
-            metadata = self._parse_metadata(source)
-            manifest = {
-                "id": trash_id,
-                "filename": source.name,
-                "enabled": source.name.lower().endswith(".jar"),
-                "deleted_at": int(time.time()),  # epoch 秒
-                "metadata": {k: v for k, v in metadata.items() if k != "icon_entry"},
-            }
-            was_enabled = manifest["enabled"]
-            try:
-                os.replace(source, destination_dir / source.name)
-                self._write_json_atomic(destination_dir / "manifest.json", manifest)
-            except Exception as exc:
-                if (destination_dir / source.name).exists() and not source.exists():
-                    os.replace(destination_dir / source.name, source)
-                shutil.rmtree(destination_dir, ignore_errors=True)
-                if isinstance(exc, OSError):
-                    self._raise_file_operation_error(exc, "删除")
-                raise
+            pending = self._load_pending_operations()
+            if source.name.lower().endswith(".jar") and self._server_running():
+                pending[source.name] = {"action": "delete", "queued_at": int(time.time())}
+                self._save_pending_operations(pending)
+                return {
+                    "status": "success",
+                    "message": "模组已加入待处理列表，将在服务器停止或重启时删除",
+                    "filename": source.name,
+                    "pending": True,
+                    "pending_action": "delete",
+                    **self._operation_state(affects_loaded_state=True),
+                }
+            pending.pop(source.name, None)
+            manifest = self._move_to_trash(source)
+            self._save_pending_operations(pending)
             return {
                 "status": "success",
                 "message": "模组已移入回收站",
-                "trash_id": trash_id,
-                **self._operation_state(affects_loaded_state=was_enabled),
+                "trash_id": manifest["id"],
+                **self._operation_state(affects_loaded_state=bool(manifest["enabled"])),
             }
 
     @staticmethod

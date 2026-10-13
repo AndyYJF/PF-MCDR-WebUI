@@ -215,6 +215,9 @@ def init_app(server_instance):
     server_instance.register_event_listener(
         MCDRPluginEvents.PLAYER_LEFT, on_player_left
     )
+    server_instance.register_event_listener(
+        MCDRPluginEvents.SERVER_STOP, on_server_stop
+    )
 
     # 初始化服务
     app.state.auth_service = AuthService(server_instance)
@@ -320,6 +323,21 @@ def on_server_output(server, info):
     global log_watcher
     if log_watcher:
         log_watcher.on_server_output(server, info)
+
+
+def on_server_stop(server):
+    """服务器停止后执行运行期间排队的模组禁用操作。"""
+    try:
+        mod_service = getattr(app.state, "mod_service", None)
+        if mod_service is None:
+            return
+        result = mod_service.apply_pending_disables()
+        if result.get("applied"):
+            server.logger.info(f"已完成待处理模组操作: {', '.join(result['applied'])}")
+        for error in result.get("errors", []):
+            server.logger.error(f"待处理模组操作失败 ({error.get('filename')}): {error.get('message')}")
+    except Exception as exc:
+        server.logger.error(f"处理待禁用模组时发生错误: {exc}")
 
 
 def on_mcdr_info(server, info):

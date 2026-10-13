@@ -15,6 +15,7 @@ import {
   Trash2,
   Upload,
   Power,
+  X,
 } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -50,6 +51,8 @@ type Mod = {
   config_count?: number
   file_conflict?: boolean
   warnings: Warning[]
+  queued_at?: number
+  pending_action?: string
 }
 type ConfigFile = { path: string; name: string; root: string; association?: string | null; structured: boolean; size: number }
 
@@ -68,13 +71,14 @@ const Mods: React.FC = () => {
   const { t, i18n } = useTranslation()
   const { isSuperAdmin } = useAuth()
   const [mods, setMods] = useState<Mod[]>([])
+  const [pendingMods, setPendingMods] = useState<Mod[]>([])
   const [trash, setTrash] = useState<Array<{ id: string; filename: string; enabled: boolean; deleted_at: number }>>([])
   const [loading, setLoading] = useState(true)
   const [trashLoading, setTrashLoading] = useState(true)
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<'all' | 'enabled' | 'disabled'>('all')
   const [loader, setLoader] = useState('all')
-  const [view, setView] = useState<'mods' | 'trash'>('mods')
+  const [view, setView] = useState<'mods' | 'pending' | 'trash'>('mods')
   const [detailMod, setDetailMod] = useState<Mod | null>(null)
   const [configMod, setConfigMod] = useState<Mod | null>(null)
   const [needsRestart, setNeedsRestart] = useState(false)
@@ -104,8 +108,9 @@ const Mods: React.FC = () => {
     setLoading(true)
     try {
       const response = await api.get('/mods')
-      const data = unwrapData<{ mods?: Mod[]; server_running?: boolean }>(response, {})
+      const data = unwrapData<{ mods?: Mod[]; pending_mods?: Mod[]; server_running?: boolean }>(response, {})
       setMods(data.mods || [])
+      setPendingMods(data.pending_mods || [])
       if (data.server_running) setNeedsRestart((current) => current)
     } catch (error) {
       showNotice(errorMessage(error).message || t('page.mods.load_failed'), 'error')
@@ -143,9 +148,9 @@ const Mods: React.FC = () => {
   }), [loader, mods, query, status])
 
   const operationStateOf = (response: { data: unknown }) =>
-    unwrapData<{ needs_restart?: boolean; warnings?: Warning[] }>(response, {})
+    unwrapData<{ needs_restart?: boolean; pending?: boolean; pending_action?: string; warnings?: Warning[] }>(response, {})
 
-  const applyOperationState = (data: { needs_restart?: boolean; warnings?: Warning[] }) => {
+  const applyOperationState = (data: { needs_restart?: boolean; pending?: boolean; pending_action?: string; warnings?: Warning[] }) => {
     if (data.needs_restart) setNeedsRestart(true)
   }
 
@@ -171,7 +176,7 @@ const Mods: React.FC = () => {
     closeConfigModal()
   }
 
-  const switchView = (nextView: 'mods' | 'trash') => {
+  const switchView = (nextView: 'mods' | 'pending' | 'trash') => {
     if (view === nextView) return
     closeModPanels()
     setView(nextView)
@@ -183,8 +188,9 @@ const Mods: React.FC = () => {
         enabled: !mod.enabled,
         acknowledge_warnings: acknowledge,
       })
-      applyOperationState(operationStateOf(response))
-      showNotice(t('page.mods.toggle_success'), 'success')
+      const operation = operationStateOf(response)
+      applyOperationState(operation)
+      showNotice(operation.pending ? t('page.mods.pending_queued') : t('page.mods.toggle_success'), 'success')
       await refresh()
       if (detailMod?.filename === mod.filename) setDetailMod(null)
     } catch (error) {
@@ -199,10 +205,19 @@ const Mods: React.FC = () => {
     if (!window.confirm(t('page.mods.delete_confirm'))) return
     try {
       const response = await api.post('/mods/trash', { filename: mod.filename })
-      applyOperationState(operationStateOf(response))
-      showNotice(t('page.mods.delete_success'), 'success')
+      const operation = operationStateOf(response)
+      applyOperationState(operation)
+      showNotice(operation.pending ? t('page.mods.pending_delete_queued') : t('page.mods.delete_success'), 'success')
       setDetailMod(null)
       await Promise.all([refresh(), refreshTrash()])
+    } catch (error) { showNotice(errorMessage(error).message || t('page.mods.operation_failed'), 'error') }
+  }
+
+  const cancelPending = async (mod: Mod) => {
+    try {
+      await api.delete(`/mods/pending/${encodeURIComponent(mod.filename)}`)
+      showNotice(t('page.mods.pending_cancelled'), 'success')
+      await refresh()
     } catch (error) { showNotice(errorMessage(error).message || t('page.mods.operation_failed'), 'error') }
   }
 
@@ -321,7 +336,7 @@ const Mods: React.FC = () => {
       {notice && <div className={`p-3 rounded-lg text-sm border ${notice.type === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-900/20 dark:border-emerald-800 dark:text-emerald-300' : 'bg-rose-50 border-rose-200 text-rose-700 dark:bg-rose-900/20 dark:border-rose-800 dark:text-rose-300'}`}>{notice.text}</div>}
 
       <div className="flex gap-2 border-b border-slate-200 dark:border-slate-800">
-        {(['mods', 'trash'] as const).map((item) => <button key={item} type="button" onClick={() => switchView(item)} className={`px-3 py-2 text-sm font-semibold border-b-2 ${view === item ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500'}`}>{item === 'mods' ? t('page.mods.mods_tab') : `${t('page.mods.trash_tab')} (${trash.length})`}</button>)}
+        {(['mods', 'pending', 'trash'] as const).map((item) => <button key={item} type="button" onClick={() => switchView(item)} className={`px-3 py-2 text-sm font-semibold border-b-2 ${view === item ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500'}`}>{item === 'mods' ? t('page.mods.mods_tab') : item === 'pending' ? `${t('page.mods.pending_tab')} (${pendingMods.length})` : `${t('page.mods.trash_tab')} (${trash.length})`}</button>)}
       </div>
 
       {view === 'mods' ? <>
@@ -339,7 +354,7 @@ const Mods: React.FC = () => {
             <div className="flex items-center gap-1"><button type="button" onClick={() => void toggleMod(mod)} className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" title={mod.enabled ? t('page.mods.disable') : t('page.mods.enable')}><Power className="w-4 h-4" /></button><button type="button" onClick={() => void openConfigs(mod)} className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" title={t('page.mods.config')}><FileCode2 className="w-4 h-4" /></button><button type="button" onClick={() => setDetailMod(mod)} className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" title={t('page.mods.details')}><Info className="w-4 h-4" /></button><button type="button" onClick={() => void trashMod(mod)} className="p-2 rounded-lg text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20" title={t('common.delete')}><Trash2 className="w-4 h-4" /></button></div>
           </div>)}
         </div>
-      </> : <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">{trashLoading && trash.length === 0 ? Array.from({ length: 5 }).map((_, index) => <ModRowSkeleton key={index} actions={2} />) : trash.length === 0 ? <div className="p-8 text-center text-sm text-slate-500">{t('page.mods.trash_empty')}</div> : trash.map((item) => <div key={item.id} className="flex flex-wrap items-center gap-3 px-4 py-3 border-b last:border-b-0 border-slate-100 dark:border-slate-800"><Trash2 className="w-4 h-4 text-slate-400" /><div className="flex-1 min-w-0"><div className="font-medium truncate text-slate-900 dark:text-white">{item.filename}</div>              <div className="text-xs text-slate-500">{formatEpoch(item.deleted_at)} · {item.enabled ? t('page.mods.enabled') : t('page.mods.disabled')}</div></div><button type="button" onClick={() => void restoreTrash(item.id)} className="p-2 rounded-lg text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20" title={t('page.mods.restore')}><RotateCcw className="w-4 h-4" /></button>{isSuperAdmin && <button type="button" onClick={() => void purgeTrash(item.id)} className="p-2 rounded-lg text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20" title={t('page.mods.purge')}><Trash2 className="w-4 h-4" /></button>}</div>)}</div>}
+      </> : view === 'pending' ? <div className="overflow-hidden rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-slate-900">{pendingMods.length === 0 ? <div className="p-8 text-center text-sm text-slate-500">{t('page.mods.pending_empty')}</div> : pendingMods.map((mod) => <div key={mod.filename} className="flex flex-wrap items-center gap-3 px-4 py-3 border-b last:border-b-0 border-slate-100 dark:border-slate-800"><ModIcon mod={mod} /><div className="min-w-0 flex-1"><div className="font-semibold text-slate-900 dark:text-white truncate">{mod.name || mod.filename}</div><div className="text-xs text-slate-500 truncate">{mod.filename} · {mod.pending_action === 'delete' ? t('page.mods.pending_delete') : t('page.mods.pending_disable')}</div></div><span className="text-xs px-2 py-1 rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">{t('page.mods.pending')}</span><button type="button" onClick={() => void cancelPending(mod)} className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" title={t('page.mods.cancel_pending')}><X className="w-4 h-4" /></button></div>)}</div> : <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">{trashLoading && trash.length === 0 ? Array.from({ length: 5 }).map((_, index) => <ModRowSkeleton key={index} actions={2} />) : trash.length === 0 ? <div className="p-8 text-center text-sm text-slate-500">{t('page.mods.trash_empty')}</div> : trash.map((item) => <div key={item.id} className="flex flex-wrap items-center gap-3 px-4 py-3 border-b last:border-b-0 border-slate-100 dark:border-slate-800"><Trash2 className="w-4 h-4 text-slate-400" /><div className="flex-1 min-w-0"><div className="font-medium truncate text-slate-900 dark:text-white">{item.filename}</div>              <div className="text-xs text-slate-500">{formatEpoch(item.deleted_at)} · {item.enabled ? t('page.mods.enabled') : t('page.mods.disabled')}</div></div><button type="button" onClick={() => void restoreTrash(item.id)} className="p-2 rounded-lg text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20" title={t('page.mods.restore')}><RotateCcw className="w-4 h-4" /></button>{isSuperAdmin && <button type="button" onClick={() => void purgeTrash(item.id)} className="p-2 rounded-lg text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20" title={t('page.mods.purge')}><Trash2 className="w-4 h-4" /></button>}</div>)}</div>}
 
       {detailMod && <Modal isOpen={true} onClose={() => setDetailMod(null)} closeLabel={t('common.close')} title={detailMod.name || detailMod.filename}>
         <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
