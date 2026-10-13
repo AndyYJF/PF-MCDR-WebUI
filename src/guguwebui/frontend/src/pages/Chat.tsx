@@ -11,6 +11,7 @@ import {
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { MessageLineSkeleton } from '../components/Skeleton'
+import { ConfirmModal } from '../components/ConfirmModal'
 import { useAuth } from '../hooks/useAuth'
 import api, { unwrapData } from '../utils/api'
 import { mergeOnlineMembers, type OnlineMemberStatus } from '../utils/onlineMembers'
@@ -45,6 +46,7 @@ const Chat: React.FC = () => {
   const [serverStatus, setServerStatus] = useState<ServerStatus>({ status: 'unknown', version: '', players: '0/0' })
   const [onlineStatus, setOnlineStatus] = useState<OnlineStatus>({ web: [], game: [], bot: [] })
   const [showOnlinePanel, setShowOnlinePanel] = useState(false)
+  const [kickTarget, setKickTarget] = useState<string | null>(null)
 
   const chatContainerRef = useRef<HTMLDivElement>(null)
   const statusFetchingRef = useRef(false)
@@ -241,7 +243,13 @@ const Chat: React.FC = () => {
   }
 
   const handleKickPlayer = async (name: string) => {
-    if (!window.confirm(t('page.chat.kick_confirm', { name }))) return
+    setKickTarget(name)
+  }
+
+  const confirmKickPlayer = async () => {
+    const name = kickTarget
+    setKickTarget(null)
+    if (!name) return
     try {
       await api.post('/server/commands', { command: `/kick ${name}` })
       loadNewMessages()
@@ -433,6 +441,7 @@ const Chat: React.FC = () => {
           )}
         </AnimatePresence>
       </div>
+      <ConfirmModal isOpen={Boolean(kickTarget)} onCancel={() => setKickTarget(null)} onConfirm={() => void confirmKickPlayer()} title={t('page.chat.kick_title')} message={kickTarget ? t('page.chat.kick_confirm', { name: kickTarget }) : undefined} confirmLabel={t('page.chat.kick_confirm_button')} cancelLabel={t('common.cancel')} danger />
     </div>
   )
 }

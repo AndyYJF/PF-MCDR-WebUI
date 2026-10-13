@@ -22,6 +22,7 @@ import {
 import React, { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { NiceSelect } from '../components/NiceSelect'
+import { ConfirmModal } from '../components/ConfirmModal'
 import { SettingsCardSkeleton, Skeleton } from '../components/Skeleton'
 import { useAuth } from '../hooks/useAuth'
 import api, { getTargetServerId, isCancel, unwrapData } from '../utils/api'
@@ -83,6 +84,7 @@ const Settings: React.FC = () => {
   const { isSuperAdmin } = useAuth()
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState<string | null>(null)
+  const [clearHistoryConfirm, setClearHistoryConfirm] = useState(false)
   const [config, setConfig] = useState<WebConfig | null>(null)
   const [aiApiKey, setAiApiKey] = useState('')
   const [showAiKey, setShowAiKey] = useState(false)
@@ -1995,12 +1997,7 @@ const Settings: React.FC = () => {
                   {t('page.settings.public_chat.history.count_prefix')}{config.chat_message_count}{t('page.settings.public_chat.history.count_suffix')}
                 </div>
                 <button
-                  onClick={async () => {
-                    if (confirm(t('page.settings.public_chat.history.clear') + '?')) {
-                      await api.delete('/chat/messages')
-                      fetchConfig()
-                    }
-                  }}
+                  onClick={() => setClearHistoryConfirm(true)}
                   className="flex items-center gap-2 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-xl shadow-lg shadow-rose-500/20 transition-all"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -2008,6 +2005,7 @@ const Settings: React.FC = () => {
                 </button>
               </div>
             </div>
+            <ConfirmModal isOpen={clearHistoryConfirm} onCancel={() => setClearHistoryConfirm(false)} onConfirm={async () => { setClearHistoryConfirm(false); await api.delete('/chat/messages'); await fetchConfig() }} title={t('page.settings.public_chat.history.clear')} message={`${t('page.settings.public_chat.history.clear')}?`} confirmLabel={t('common.confirm')} cancelLabel={t('common.cancel')} danger />
           </div>
 
           <div className="flex justify-end pt-2">

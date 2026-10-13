@@ -478,6 +478,8 @@
         "chat": {
             "header_title": "服务器聊天页",
             "kick_confirm": "确定要将玩家 {{name}} 踢出服务器吗？",
+            "kick_title": "踢出玩家",
+            "kick_confirm_button": "踢出",
             "header": {
                 "players_online": "在线"
             },

@@ -21,6 +21,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { CodeMirrorEditor } from '../components/CodeMirrorEditor'
 import { ConfigForm, type GenericConfigObject } from '../components/ConfigForm'
+import { ConfirmModal } from '../components/ConfirmModal'
 import { Modal } from '../components/Modal'
 import { ModIcon } from '../components/ModIcon'
 import { NiceSelect } from '../components/NiceSelect'
@@ -98,6 +99,9 @@ const Mods: React.FC = () => {
   const [configMode, setConfigMode] = useState<'form' | 'code'>('code')
   const [configDirty, setConfigDirty] = useState(false)
   const [configLoading, setConfigLoading] = useState(false)
+  const [warningDialog, setWarningDialog] = useState<{ mod: Mod; message: string; warnings: Warning[] } | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<Mod | null>(null)
+  const [purgeTarget, setPurgeTarget] = useState<string | null>(null)
 
   const showNotice = useCallback((text: string, type: 'success' | 'error') => {
     setNotice({ text, type })
@@ -195,14 +199,20 @@ const Mods: React.FC = () => {
       if (detailMod?.filename === mod.filename) setDetailMod(null)
     } catch (error) {
       const result = errorMessage(error)
-      if ((error as { response?: { status?: number } }).response?.status === 409 && result.warnings.length > 0 && window.confirm(`${result.message}\n\n${result.warnings.map((warning) => warning.message).join('\n')}\n\n${t('page.mods.confirm_warning')}`)) {
-        await toggleMod(mod, true)
+      if ((error as { response?: { status?: number } }).response?.status === 409 && result.warnings.length > 0) {
+        setWarningDialog({ mod, message: result.message, warnings: result.warnings })
       } else showNotice(result.message || t('page.mods.operation_failed'), 'error')
     }
   }
 
   const trashMod = async (mod: Mod) => {
-    if (!window.confirm(t('page.mods.delete_confirm'))) return
+    setDeleteTarget(mod)
+  }
+
+  const confirmTrashMod = async () => {
+    const mod = deleteTarget
+    setDeleteTarget(null)
+    if (!mod) return
     try {
       const response = await api.post('/mods/trash', { filename: mod.filename })
       const operation = operationStateOf(response)
@@ -314,7 +324,13 @@ const Mods: React.FC = () => {
   }
 
   const purgeTrash = async (id: string) => {
-    if (!window.confirm(t('page.mods.purge_confirm'))) return
+    setPurgeTarget(id)
+  }
+
+  const confirmPurgeTrash = async () => {
+    const id = purgeTarget
+    setPurgeTarget(null)
+    if (!id) return
     try { await api.delete(`/mods/trash/${id}`, { params: { confirm: true } }); await refreshTrash(); showNotice(t('page.mods.purge_success'), 'success') }
     catch (error) { showNotice(errorMessage(error).message || t('page.mods.operation_failed'), 'error') }
   }
@@ -407,6 +423,13 @@ const Mods: React.FC = () => {
       </Modal>}
 
       <Modal isOpen={uploadOpen} onClose={() => setUploadOpen(false)} closeLabel={t('common.close')} title={t('page.mods.upload')}><div className="space-y-4"><label className="flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-slate-300 p-4 dark:border-slate-700"><FilePlus2 className="h-5 w-5 text-blue-600" /><span className="truncate text-sm">{uploadFile?.name || t('page.mods.choose_jar')}</span><input type="file" accept=".jar,application/java-archive" className="hidden" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label><label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300"><input type="checkbox" checked={uploadEnabled} onChange={(event) => setUploadEnabled(event.target.checked)} />{t('page.mods.initial_enabled')}</label>{uploadLimit && <p className="text-xs text-slate-500">{t('page.mods.upload_limit', { limit: uploadLimit })}</p>}{uploadWarnings.length > 0 && <div className="space-y-1 rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:bg-amber-900/20 dark:text-amber-200"><strong>{t('page.mods.compatibility_warning')}</strong>{uploadWarnings.map((warning) => <div key={`${warning.code}-${warning.message}`}>{warning.message}</div>)}<label className="mt-2 flex gap-2"><input type="checkbox" checked={confirmUploadWarnings} onChange={(event) => setConfirmUploadWarnings(event.target.checked)} />{t('page.mods.confirm_warning')}</label></div>}{uploadProgress > 0 && <div className="h-2 overflow-hidden rounded bg-slate-100 dark:bg-slate-800"><div className="h-full bg-blue-600 transition-all" style={{ width: `${uploadProgress}%` }} /></div>}<button type="button" disabled={!uploadFile || (uploadWarnings.length > 0 && !confirmUploadWarnings)} onClick={() => void upload(uploadWarnings.length > 0)} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 py-2.5 font-bold text-white shadow-lg shadow-blue-600/20 disabled:opacity-50"><Upload className="h-4 w-4" />{t('page.mods.upload')}</button></div></Modal>
+      <ConfirmModal isOpen={Boolean(warningDialog)} onCancel={() => setWarningDialog(null)} onConfirm={() => { const dialog = warningDialog; setWarningDialog(null); if (dialog) void toggleMod(dialog.mod, true) }} title={t('page.mods.compatibility_warning')} message={warningDialog?.message} confirmLabel={t('common.confirm')} cancelLabel={t('common.cancel')}>
+        <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
+          {warningDialog?.warnings.map((warning) => <div key={`${warning.code}-${warning.message}`}>{warning.message}</div>)}
+        </div>
+      </ConfirmModal>
+      <ConfirmModal isOpen={Boolean(deleteTarget)} onCancel={() => setDeleteTarget(null)} onConfirm={() => void confirmTrashMod()} title={t('common.delete')} message={t('page.mods.delete_confirm')} confirmLabel={t('common.confirm')} cancelLabel={t('common.cancel')} danger />
+      <ConfirmModal isOpen={Boolean(purgeTarget)} onCancel={() => setPurgeTarget(null)} onConfirm={() => void confirmPurgeTrash()} title={t('page.mods.purge')} message={t('page.mods.purge_confirm')} confirmLabel={t('common.confirm')} cancelLabel={t('common.cancel')} danger />
     </div>
   )
 }

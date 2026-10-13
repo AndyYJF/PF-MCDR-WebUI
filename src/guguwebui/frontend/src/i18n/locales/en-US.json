@@ -477,6 +477,8 @@
         "chat": {
             "header_title": "Server Chat",
             "kick_confirm": "Are you sure you want to kick player {{name}} from the server?",
+            "kick_title": "Kick player",
+            "kick_confirm_button": "Kick",
             "header": {
                 "players_online": "Online"
             },
