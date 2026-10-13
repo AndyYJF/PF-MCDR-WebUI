@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Boxes,
   ChevronRight,
+  Download,
   FileCode2,
   FilePlus2,
   FileText,
@@ -54,7 +55,10 @@ type Mod = {
   warnings: Warning[]
   queued_at?: number
   pending_action?: string
+  target_version?: string
+  source?: string
 }
+type ModUpdate = Mod & { latest_version: string; download_url: string; changelog?: string; source?: string }
 type ConfigFile = { path: string; name: string; root: string; association?: string | null; structured: boolean; size: number }
 
 const formatBytes = (bytes: number) => {
@@ -73,13 +77,17 @@ const Mods: React.FC = () => {
   const { isSuperAdmin } = useAuth()
   const [mods, setMods] = useState<Mod[]>([])
   const [pendingMods, setPendingMods] = useState<Mod[]>([])
+  const [updates, setUpdates] = useState<ModUpdate[]>([])
+  const [updatesTotal, setUpdatesTotal] = useState(0)
+  const [updatesOffset, setUpdatesOffset] = useState(0)
+  const [updatesLoading, setUpdatesLoading] = useState(false)
   const [trash, setTrash] = useState<Array<{ id: string; filename: string; enabled: boolean; deleted_at: number }>>([])
   const [loading, setLoading] = useState(true)
   const [trashLoading, setTrashLoading] = useState(true)
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<'all' | 'enabled' | 'disabled'>('all')
   const [loader, setLoader] = useState('all')
-  const [view, setView] = useState<'mods' | 'pending' | 'trash'>('mods')
+  const [view, setView] = useState<'mods' | 'pending' | 'updates' | 'trash'>('mods')
   const [detailMod, setDetailMod] = useState<Mod | null>(null)
   const [configMod, setConfigMod] = useState<Mod | null>(null)
   const [needsRestart, setNeedsRestart] = useState(false)
@@ -135,13 +143,29 @@ const Mods: React.FC = () => {
     }
   }, [showNotice, t])
 
+  const refreshUpdates = useCallback(async (refresh = false, offset = updatesOffset) => {
+    setUpdatesLoading(true)
+    try {
+      const response = await api.get('/mods/updates', { params: { offset, limit: 10, refresh } })
+      const data = unwrapData<{ items?: ModUpdate[]; total?: number; offset?: number }>(response, {})
+      setUpdates(data.items || [])
+      setUpdatesTotal(data.total || 0)
+      setUpdatesOffset(data.offset || offset)
+    } catch (error) {
+      showNotice(errorMessage(error).message || t('page.mods.update_check_failed'), 'error')
+    } finally {
+      setUpdatesLoading(false)
+    }
+  }, [showNotice, t, updatesOffset])
+
   useEffect(() => {
     void refresh()
     void refreshTrash()
+    void refreshUpdates()
     api.get('/mods/settings')
       .then((response) => setUploadLimit(unwrapData<{ upload_max_mib?: number }>(response, {}).upload_max_mib || null))
       .catch(() => undefined)
-  }, [refresh, refreshTrash])
+  }, [refresh, refreshTrash, refreshUpdates])
 
   const loaders = useMemo(() => ['all', ...Array.from(new Set(mods.map((mod) => mod.loader).filter(Boolean)))], [mods])
   const filteredMods = useMemo(() => mods.filter((mod) => {
@@ -180,10 +204,11 @@ const Mods: React.FC = () => {
     closeConfigModal()
   }
 
-  const switchView = (nextView: 'mods' | 'pending' | 'trash') => {
+  const switchView = (nextView: 'mods' | 'pending' | 'updates' | 'trash') => {
     if (view === nextView) return
     closeModPanels()
     setView(nextView)
+    if (nextView === 'updates') void refreshUpdates()
   }
 
   const toggleMod = async (mod: Mod, acknowledge = false) => {
@@ -228,6 +253,20 @@ const Mods: React.FC = () => {
       await api.delete(`/mods/pending/${encodeURIComponent(mod.filename)}`)
       showNotice(t('page.mods.pending_cancelled'), 'success')
       await refresh()
+    } catch (error) { showNotice(errorMessage(error).message || t('page.mods.operation_failed'), 'error') }
+  }
+
+  const checkUpdates = async () => {
+    await refreshUpdates(true, 0)
+    showNotice(t('page.mods.update_check_success'), 'success')
+  }
+
+  const queueUpdates = async (filenames: string[]) => {
+    try {
+      const response = await api.post('/mods/updates/apply', filenames.length > 1 ? {} : (filenames.length ? { filenames } : {}))
+      const data = unwrapData<{ queued?: Array<{ filename: string }>; errors?: Array<{ filename: string; message: string }> }>(response, {})
+      showNotice(data.errors?.length ? t('page.mods.update_partial') : t('page.mods.update_queued'), data.errors?.length ? 'error' : 'success')
+      await Promise.all([refresh(), refreshUpdates(false, updatesOffset)])
     } catch (error) { showNotice(errorMessage(error).message || t('page.mods.operation_failed'), 'error') }
   }
 
@@ -352,7 +391,7 @@ const Mods: React.FC = () => {
       {notice && <div className={`p-3 rounded-lg text-sm border ${notice.type === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-900/20 dark:border-emerald-800 dark:text-emerald-300' : 'bg-rose-50 border-rose-200 text-rose-700 dark:bg-rose-900/20 dark:border-rose-800 dark:text-rose-300'}`}>{notice.text}</div>}
 
       <div className="flex gap-2 border-b border-slate-200 dark:border-slate-800">
-        {(['mods', 'pending', 'trash'] as const).map((item) => <button key={item} type="button" onClick={() => switchView(item)} className={`px-3 py-2 text-sm font-semibold border-b-2 ${view === item ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500'}`}>{item === 'mods' ? t('page.mods.mods_tab') : item === 'pending' ? `${t('page.mods.pending_tab')} (${pendingMods.length})` : `${t('page.mods.trash_tab')} (${trash.length})`}</button>)}
+        {(['mods', 'pending', 'updates', 'trash'] as const).map((item) => <button key={item} type="button" onClick={() => switchView(item)} className={`px-3 py-2 text-sm font-semibold border-b-2 ${view === item ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500'}`}>{item === 'mods' ? t('page.mods.mods_tab') : item === 'pending' ? `${t('page.mods.pending_tab')} (${pendingMods.length})` : item === 'updates' ? `${t('page.mods.updates_tab')} (${updatesTotal})` : `${t('page.mods.trash_tab')} (${trash.length})`}</button>)}
       </div>
 
       {view === 'mods' ? <>
@@ -370,7 +409,7 @@ const Mods: React.FC = () => {
             <div className="flex items-center gap-1"><button type="button" onClick={() => void toggleMod(mod)} className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" title={mod.enabled ? t('page.mods.disable') : t('page.mods.enable')}><Power className="w-4 h-4" /></button><button type="button" onClick={() => void openConfigs(mod)} className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" title={t('page.mods.config')}><FileCode2 className="w-4 h-4" /></button><button type="button" onClick={() => setDetailMod(mod)} className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" title={t('page.mods.details')}><Info className="w-4 h-4" /></button><button type="button" onClick={() => void trashMod(mod)} className="p-2 rounded-lg text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20" title={t('common.delete')}><Trash2 className="w-4 h-4" /></button></div>
           </div>)}
         </div>
-      </> : view === 'pending' ? <div className="overflow-hidden rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-slate-900">{pendingMods.length === 0 ? <div className="p-8 text-center text-sm text-slate-500">{t('page.mods.pending_empty')}</div> : pendingMods.map((mod) => <div key={mod.filename} className="flex flex-wrap items-center gap-3 px-4 py-3 border-b last:border-b-0 border-slate-100 dark:border-slate-800"><ModIcon mod={mod} /><div className="min-w-0 flex-1"><div className="font-semibold text-slate-900 dark:text-white truncate">{mod.name || mod.filename}</div><div className="text-xs text-slate-500 truncate">{mod.filename} · {mod.pending_action === 'delete' ? t('page.mods.pending_delete') : t('page.mods.pending_disable')}</div></div><span className="text-xs px-2 py-1 rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">{t('page.mods.pending')}</span><button type="button" onClick={() => void cancelPending(mod)} className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" title={t('page.mods.cancel_pending')}><X className="w-4 h-4" /></button></div>)}</div> : <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">{trashLoading && trash.length === 0 ? Array.from({ length: 5 }).map((_, index) => <ModRowSkeleton key={index} actions={2} />) : trash.length === 0 ? <div className="p-8 text-center text-sm text-slate-500">{t('page.mods.trash_empty')}</div> : trash.map((item) => <div key={item.id} className="flex flex-wrap items-center gap-3 px-4 py-3 border-b last:border-b-0 border-slate-100 dark:border-slate-800"><Trash2 className="w-4 h-4 text-slate-400" /><div className="flex-1 min-w-0"><div className="font-medium truncate text-slate-900 dark:text-white">{item.filename}</div>              <div className="text-xs text-slate-500">{formatEpoch(item.deleted_at)} · {item.enabled ? t('page.mods.enabled') : t('page.mods.disabled')}</div></div><button type="button" onClick={() => void restoreTrash(item.id)} className="p-2 rounded-lg text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20" title={t('page.mods.restore')}><RotateCcw className="w-4 h-4" /></button>{isSuperAdmin && <button type="button" onClick={() => void purgeTrash(item.id)} className="p-2 rounded-lg text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20" title={t('page.mods.purge')}><Trash2 className="w-4 h-4" /></button>}</div>)}</div>}
+      </> : view === 'pending' ? <div className="overflow-hidden rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-slate-900">{pendingMods.length === 0 ? <div className="p-8 text-center text-sm text-slate-500">{t('page.mods.pending_empty')}</div> : pendingMods.map((mod) => <div key={mod.filename} className="flex flex-wrap items-center gap-3 px-4 py-3 border-b last:border-b-0 border-slate-100 dark:border-slate-800"><ModIcon mod={mod} /><div className="min-w-0 flex-1"><div className="font-semibold text-slate-900 dark:text-white truncate">{mod.name || mod.filename}</div><div className="text-xs text-slate-500 truncate">{mod.filename} · {mod.pending_action === 'delete' ? t('page.mods.pending_delete') : mod.pending_action === 'update' ? `${t('page.mods.pending_update')} ${mod.target_version || ''}` : t('page.mods.pending_disable')}</div></div><span className="text-xs px-2 py-1 rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">{t('page.mods.pending')}</span><button type="button" onClick={() => void cancelPending(mod)} className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" title={t('page.mods.cancel_pending')}><X className="w-4 h-4" /></button></div>)}</div> : view === 'updates' ? <div className="space-y-3"><div className="flex justify-end gap-2"><button type="button" onClick={() => void checkUpdates()} disabled={updatesLoading} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"><RefreshCw className={`h-4 w-4 ${updatesLoading ? 'animate-spin' : ''}`} />{t('page.mods.check_updates')}</button><button type="button" onClick={() => void queueUpdates(updates.map((item) => item.filename))} disabled={updates.length === 0} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"><Download className="h-4 w-4" />{t('page.mods.update_all')}</button></div><div className="overflow-hidden rounded-lg border border-blue-200 dark:border-blue-800 bg-white dark:bg-slate-900">{updatesLoading && updates.length === 0 ? <div className="p-8 text-center text-sm text-slate-500">{t('common.loading')}</div> : updates.length === 0 ? <div className="p-8 text-center text-sm text-slate-500">{t('page.mods.updates_empty')}</div> : updates.map((mod) => <div key={mod.filename} className="flex flex-wrap items-center gap-3 border-b border-slate-100 px-4 py-3 last:border-b-0 dark:border-slate-800"><ModIcon mod={mod} /><div className="min-w-0 flex-1"><div className="font-semibold text-slate-900 dark:text-white truncate">{mod.name || mod.filename}</div><div className="text-xs text-slate-500 truncate">{mod.filename} · {mod.version || t('common.unknown')} → {mod.latest_version}</div>{mod.changelog && <div className="mt-1 text-xs text-slate-400 line-clamp-2">{mod.changelog}</div>}</div><button type="button" onClick={() => void queueUpdates([mod.filename])} className="inline-flex items-center gap-1 rounded-lg px-3 py-2 text-sm font-semibold text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20" title={t('page.mods.update')}><Download className="h-4 w-4" />{t('page.mods.update')}</button></div>)}</div><div className="flex items-center justify-between text-sm text-slate-500"><span>{updatesTotal ? `${updatesOffset + 1}-${Math.min(updatesOffset + updates.length, updatesTotal)} / ${updatesTotal}` : ''}</span><div className="flex gap-2"><button type="button" disabled={updatesOffset <= 0 || updatesLoading} onClick={() => void refreshUpdates(false, Math.max(0, updatesOffset - 10))} className="rounded-lg border border-slate-200 px-3 py-1.5 disabled:opacity-40 dark:border-slate-700">{t('common.previous')}</button><button type="button" disabled={updatesOffset + updates.length >= updatesTotal || updatesLoading} onClick={() => void refreshUpdates(false, updatesOffset + 10)} className="rounded-lg border border-slate-200 px-3 py-1.5 disabled:opacity-40 dark:border-slate-700">{t('common.next')}</button></div></div></div> : <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">{trashLoading && trash.length === 0 ? Array.from({ length: 5 }).map((_, index) => <ModRowSkeleton key={index} actions={2} />) : trash.length === 0 ? <div className="p-8 text-center text-sm text-slate-500">{t('page.mods.trash_empty')}</div> : trash.map((item) => <div key={item.id} className="flex flex-wrap items-center gap-3 px-4 py-3 border-b last:border-b-0 border-slate-100 dark:border-slate-800"><Trash2 className="w-4 h-4 text-slate-400" /><div className="flex-1 min-w-0"><div className="font-medium truncate text-slate-900 dark:text-white">{item.filename}</div>              <div className="text-xs text-slate-500">{formatEpoch(item.deleted_at)} · {item.enabled ? t('page.mods.enabled') : t('page.mods.disabled')}</div></div><button type="button" onClick={() => void restoreTrash(item.id)} className="p-2 rounded-lg text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20" title={t('page.mods.restore')}><RotateCcw className="w-4 h-4" /></button>{isSuperAdmin && <button type="button" onClick={() => void purgeTrash(item.id)} className="p-2 rounded-lg text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20" title={t('page.mods.purge')}><Trash2 className="w-4 h-4" /></button>}</div>)}</div>}
 
       {detailMod && <Modal isOpen={true} onClose={() => setDetailMod(null)} closeLabel={t('common.close')} title={detailMod.name || detailMod.filename}>
         <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">

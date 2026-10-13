@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
@@ -62,6 +62,55 @@ async def list_pending_mods(request: Request, _admin: dict = Depends(get_current
     result = await run_in_threadpool(request.app.state.mod_service.list_pending)
     items = result.get("items", [])
     return JSONResponse(page(items=items, total=len(items), offset=0, limit=len(items)))
+
+
+@router.get("/updates", response_model=PageEnvelope)
+async def list_mod_updates(
+    request: Request,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    refresh: bool = Query(False),
+    _admin: dict = Depends(get_current_admin),
+):
+    result = await run_in_threadpool(request.app.state.mod_service.list_updates, refresh=refresh, offset=offset, limit=limit)
+    return JSONResponse(page(items=result.get("items", []), total=result.get("total", 0), offset=result.get("offset", offset), limit=result.get("limit", limit)))
+
+
+@router.post("/updates/check", response_model=ApiSuccessEnvelope)
+async def check_mod_updates(request: Request, _admin: dict = Depends(get_current_admin)):
+    result = await run_in_threadpool(request.app.state.mod_service.check_updates)
+    return JSONResponse(success({"items": result.get("items", []), "checked_at": result.get("checked_at")}))
+
+
+@router.post("/updates/apply", response_model=ApiSuccessEnvelope)
+async def queue_mod_updates(request: Request, body: dict = Body(default_factory=dict), admin: dict = Depends(get_current_admin)):
+    filenames = body.get("filenames") if isinstance(body, dict) else None
+    if not isinstance(filenames, list) or not filenames:
+        filenames = [body.get("filename")] if isinstance(body, dict) and body.get("filename") else []
+    if not filenames:
+        cached = await run_in_threadpool(request.app.state.mod_service.list_updates, refresh=False, offset=0, limit=100)
+        filenames = [item.get("filename") for item in cached.get("items", []) if isinstance(item, dict) and item.get("filename")]
+    if not filenames:
+        raise BusinessException("没有可更新的模组")
+    queued = []
+    errors = []
+    for filename in filenames:
+        try:
+            item = await run_in_threadpool(request.app.state.mod_service.queue_update, str(filename))
+            queued.append(item)
+        except Exception as exc:
+            errors.append({"filename": str(filename), "message": str(exc)})
+    if not queued and errors:
+        raise BusinessException(errors[0]["message"], data={"errors": errors})
+    _audit(admin, "mod.update", f"加入模组更新待处理队列: {', '.join(str(item.get('filename')) for item in queued)}", {"filenames": [item.get("filename") for item in queued]})
+    return JSONResponse(success({"queued": queued, "errors": errors}, message="模组更新已加入待处理列表"))
+
+
+@router.post("/{filename}/update", response_model=ApiSuccessEnvelope)
+async def queue_single_mod_update(request: Request, filename: str, admin: dict = Depends(get_current_admin)):
+    result = await run_in_threadpool(request.app.state.mod_service.queue_update, filename)
+    _audit(admin, "mod.update", f"加入模组更新待处理队列: {filename}", {"filename": filename})
+    return JSONResponse(success(_operation_state(result) | {"filename": filename, "target_version": result.get("target_version")}, message=result.get("message")))
 
 
 @router.get("/icon")

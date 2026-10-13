@@ -218,6 +218,9 @@ def init_app(server_instance):
     server_instance.register_event_listener(
         MCDRPluginEvents.SERVER_STOP, on_server_stop
     )
+    server_instance.register_event_listener(
+        MCDRPluginEvents.SERVER_START_PRE, on_server_start_pre
+    )
 
     # 初始化服务
     app.state.auth_service = AuthService(server_instance)
@@ -229,6 +232,7 @@ def init_app(server_instance):
     app.state.chat_service = ChatService(server_instance, app.state.config_service)
     app.state.player_service = PlayerService(server_instance, app.state.config_service)
     app.state.mod_service = ModService(server_instance, app.state.config_service)
+    app.state.mod_service.install_start_guard()
 
     # 初始化服务器状态监控（先停止旧实例，避免重复启动）
     try:
@@ -331,13 +335,26 @@ def on_server_stop(server):
         mod_service = getattr(app.state, "mod_service", None)
         if mod_service is None:
             return
-        result = mod_service.apply_pending_disables()
+        result = mod_service.apply_pending_operations()
         if result.get("applied"):
             server.logger.info(f"已完成待处理模组操作: {', '.join(result['applied'])}")
         for error in result.get("errors", []):
             server.logger.error(f"待处理模组操作失败 ({error.get('filename')}): {error.get('message')}")
     except Exception as exc:
         server.logger.error(f"处理待禁用模组时发生错误: {exc}")
+
+
+def on_server_start_pre(server):
+    """启动前同步兜底处理队列，覆盖重启和其它插件直接启动的场景。"""
+    try:
+        mod_service = getattr(app.state, "mod_service", None)
+        if mod_service is None or not mod_service.has_pending_operations():
+            return
+        result = mod_service.apply_pending_operations()
+        if result.get("remaining"):
+            server.logger.error("待处理模组操作尚未完成，本次启动将被拦截")
+    except Exception as exc:
+        server.logger.error(f"启动前处理待操作模组时发生错误: {exc}")
 
 
 def on_mcdr_info(server, info):

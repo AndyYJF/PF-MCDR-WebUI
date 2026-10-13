@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 import javaproperties
+import requests
 
 try:
     import tomllib
@@ -55,6 +56,7 @@ class ModService:
         self.config_service = config_service
         self._lock = threading.RLock()
         self._metadata_cache: dict[tuple[str, int, int], dict] = {}
+        self._start_guard_lock = threading.RLock()
         # 同一内置数据库可能服务多个目标服务器，按工作目录隔离队列。
         self._pending_namespace = f"mods:{self.working_dir()}"
 
@@ -70,9 +72,13 @@ class ModService:
             if isinstance(value, dict):
                 action = value.get("action")
                 queued_at = value.get("queued_at")
-                if action in {"disable", "delete"} and queued_at is not None:
+                if action in {"disable", "delete", "update"} and queued_at is not None:
                     try:
-                        result[name] = {"action": action, "queued_at": int(queued_at)}
+                        item = {"action": action, "queued_at": int(queued_at)}
+                        for key in ("temp_path", "target_version", "download_url", "source"):
+                            if value.get(key) is not None:
+                                item[key] = str(value[key])
+                        result[name] = item
                     except (ValueError, TypeError):
                         continue
             else:
@@ -104,6 +110,9 @@ class ModService:
                 item = dict(entry)
                 item["queued_at"] = operation["queued_at"]
                 item["pending_action"] = operation["action"]
+                for key in ("target_version", "source", "download_url"):
+                    if operation.get(key) is not None:
+                        item[key] = operation[key]
                 result.append(item)
                 stale.discard(filename)
             if stale:
@@ -120,6 +129,11 @@ class ModService:
 
     def trash_dir(self) -> Path:
         path = self.working_dir() / ".guguwebui" / "mod-trash"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def update_dir(self) -> Path:
+        path = self.working_dir() / ".guguwebui" / "mod-updates"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -330,6 +344,8 @@ class ModService:
                         "dependencies": self._dependency_list(data.get("depends")),
                         "conflicts": self._dependency_list(data.get("breaks")) + self._dependency_list(data.get("conflicts")),
                         "icon_entry": icon if isinstance(icon, str) else None,
+                        "update_url": self._metadata_update_url(data),
+                        "modrinth_id": self._metadata_modrinth_id(data),
                         "recognized": True,
                     }
                     self._metadata_cache[cache_key] = metadata
@@ -351,6 +367,8 @@ class ModService:
                         "dependencies": self._dependency_list(ql.get("depends")),
                         "conflicts": self._dependency_list(ql.get("breaks")),
                         "icon_entry": meta.get("icon") if isinstance(meta.get("icon"), str) else None,
+                        "update_url": self._metadata_update_url({**ql, **meta}),
+                        "modrinth_id": self._metadata_modrinth_id({**ql, **meta}),
                         "recognized": True,
                     }
                     self._metadata_cache[cache_key] = metadata
@@ -378,6 +396,8 @@ class ModService:
                         "dependencies": dependencies,
                         "conflicts": conflicts,
                         "icon_entry": mod.get("logoFile") if isinstance(mod.get("logoFile"), str) else None,
+                        "update_url": self._metadata_update_url({**data, **mod}),
+                        "modrinth_id": self._metadata_modrinth_id({**data, **mod}),
                         "recognized": True,
                     }
                     self._metadata_cache[cache_key] = metadata
@@ -402,6 +422,38 @@ class ModService:
     @staticmethod
     def _normalized_id(value: str) -> str:
         return _SAFE_ID_RE.sub("", str(value or "").lower())
+
+    @staticmethod
+    def _metadata_update_url(data: Any) -> Optional[str]:
+        if not isinstance(data, dict):
+            return None
+        custom = data.get("custom") if isinstance(data.get("custom"), dict) else {}
+        candidates = (
+            data.get("update_url"), data.get("updateUrl"), data.get("updateJSON"), data.get("update_json"),
+            custom.get("update_url"), custom.get("updateUrl"), custom.get("updateJSON"), custom.get("update_json"),
+        )
+        for value in candidates:
+            if isinstance(value, str) and value.startswith(("https://", "http://")):
+                return value
+        return None
+
+    @staticmethod
+    def _metadata_modrinth_id(data: Any) -> Optional[str]:
+        if not isinstance(data, dict):
+            return None
+        custom = data.get("custom") if isinstance(data.get("custom"), dict) else {}
+        candidates = (
+            data.get("modrinth"), data.get("modrinth_id"), data.get("modrinthProject"),
+            custom.get("modrinth"), custom.get("modrinth_id"), custom.get("modrinthProject"),
+        )
+        for value in candidates:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        contact = data.get("contact") if isinstance(data.get("contact"), dict) else {}
+        for value in contact.values():
+            if isinstance(value, str) and "modrinth.com/mod/" in value:
+                return value.split("modrinth.com/mod/", 1)[1].split("/", 1)[0].split("?", 1)[0]
+        return None
 
     def _config_roots(self) -> list[Path]:
         working = self.working_dir()
@@ -547,8 +599,35 @@ class ModService:
     def list_pending(self) -> dict:
         return {"status": "success", "items": self._pending_entries()}
 
-    def apply_pending_disables(self) -> dict:
-        """在服务器停止后执行运行期间排队的禁用操作。"""
+    def has_pending_operations(self) -> bool:
+        return bool(self._load_pending_operations())
+
+    def install_start_guard(self) -> None:
+        """拦截 MCDR 的真实启动入口，确保重启和第三方启动也先完成队列。"""
+        target = getattr(self.server, "_mcdr_server", None)
+        if target is None or not callable(getattr(target, "start_server", None)):
+            return
+        with self._start_guard_lock:
+            original = getattr(target, "_guguwebui_original_start_server", None)
+            if original is None:
+                original = target.start_server
+                setattr(target, "_guguwebui_original_start_server", original)
+            service = self
+
+            def guarded_start(*args, **kwargs):
+                if service.has_pending_operations():
+                    result = service.apply_pending_operations()
+                    if result.get("remaining"):
+                        logger = getattr(service.server, "logger", None)
+                        if logger:
+                            logger.error("待处理模组操作未完成，已拦截本次服务器启动")
+                        return False
+                return original(*args, **kwargs)
+
+            target.start_server = guarded_start
+
+    def apply_pending_operations(self) -> dict:
+        """在服务器停止后或下一次启动前执行排队的模组操作。"""
         with self._lock:
             pending = self._load_pending_operations()
             applied = []
@@ -558,9 +637,18 @@ class ModService:
                 try:
                     source = self._mod_path(filename, must_exist=False)
                     if not source.exists():
+                        self._discard_pending_temp(operation)
                         continue
                     if operation["action"] == "delete":
                         self._move_to_trash(source)
+                    elif operation["action"] == "update":
+                        temp_path = self._pending_temp_path(operation.get("temp_path"))
+                        if temp_path is None or not temp_path.is_file():
+                            raise BusinessException("更新文件不存在，请重新检查更新")
+                        metadata = self._parse_metadata(temp_path)
+                        if metadata.get("parse_error"):
+                            raise BusinessException("下载的更新文件无法解析")
+                        os.replace(temp_path, source)
                     else:
                         target = self._mod_path(filename + ".disabled", must_exist=False)
                         if target.exists():
@@ -574,13 +662,152 @@ class ModService:
             self._save_pending_operations(remaining)
             return {"applied": applied, "errors": errors, "remaining": list(remaining)}
 
+    # 兼容已有事件处理器和第三方调用方。
+    def apply_pending_disables(self) -> dict:
+        return self.apply_pending_operations()
+
+    def _pending_temp_path(self, value: Any) -> Optional[Path]:
+        if not isinstance(value, str) or not value:
+            return None
+        base = self.working_dir().resolve()
+        path = (base / value).resolve() if not Path(value).is_absolute() else Path(value).resolve()
+        try:
+            path.relative_to(self.update_dir().resolve())
+        except ValueError:
+            return None
+        return path
+
+    def _discard_pending_temp(self, operation: Optional[dict]) -> None:
+        if isinstance(operation, dict) and operation.get("action") == "update":
+            path = self._pending_temp_path(operation.get("temp_path"))
+            if path is not None:
+                path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _version_key(value: Any) -> tuple:
+        parts = re.findall(r"\d+|[A-Za-z]+", str(value or "").lstrip("vV"))
+        return tuple((0, int(part)) if part.isdigit() else (1, part.lower()) for part in parts)
+
+    def _fetch_json(self, url: str) -> Any:
+        response = requests.get(url, timeout=15, headers={"User-Agent": "PF-MCDR-WebUI mod updater"})
+        response.raise_for_status()
+        return response.json()
+
+    def _find_update_from_payload(self, payload: Any, current_version: str, loader: str) -> Optional[dict]:
+        candidates = payload if isinstance(payload, list) else []
+        if isinstance(payload, dict):
+            if isinstance(payload.get("versions"), list):
+                candidates = payload["versions"]
+            elif isinstance(payload.get("promos"), dict):
+                candidates = []
+                for key, version in payload["promos"].items():
+                    if not str(key).lower().endswith("-latest"):
+                        continue
+                    detail = payload.get(str(version)) if isinstance(payload.get(str(version)), dict) else {}
+                    candidates.append({"version": version, **detail})
+            elif any(payload.get(key) for key in ("version", "latest_version", "latestVersion")):
+                candidates = [payload]
+        normalized = []
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            version = item.get("version") or item.get("version_number") or item.get("latest_version") or item.get("latestVersion")
+            if not version:
+                continue
+            loaders = item.get("loaders") or []
+            if loader and isinstance(loaders, list) and loaders and loader not in {str(x).lower() for x in loaders}:
+                continue
+            files = item.get("files") if isinstance(item.get("files"), list) else []
+            file_item = next((f for f in files if isinstance(f, dict) and f.get("url")), None)
+            url = item.get("download_url") or item.get("downloadUrl") or item.get("url") or (file_item or {}).get("url")
+            if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+                continue
+            normalized.append({
+                "version": str(version), "latest_version": str(version), "download_url": url,
+                "source": item.get("source") or "metadata",
+                "changelog": str(item.get("changelog") or item.get("description") or ""),
+            })
+        newer = [item for item in normalized if self._version_key(item["version"]) > self._version_key(current_version)]
+        return sorted(newer, key=lambda item: self._version_key(item["version"]), reverse=True)[0] if newer else None
+
+    def _check_mod_update(self, entry: dict) -> Optional[dict]:
+        urls = []
+        if entry.get("update_url"):
+            urls.append((entry["update_url"], "metadata"))
+        project_id = entry.get("modrinth_id") or entry.get("id")
+        if project_id:
+            urls.append((f"https://api.modrinth.com/v2/project/{requests.utils.quote(str(project_id), safe='')}/version", "modrinth"))
+        for url, source in urls:
+            try:
+                update = self._find_update_from_payload(self._fetch_json(url), str(entry.get("version") or ""), str(entry.get("loader") or "").lower())
+            except Exception:
+                continue
+            if update:
+                return {**entry, **update, "source": source}
+        return None
+
+    def check_updates(self) -> dict:
+        updates = []
+        for entry in self._scan_entries():
+            if not entry.get("enabled"):
+                continue
+            update = self._check_mod_update(entry)
+            if update:
+                updates.append(update)
+        set_state(self._pending_namespace, "available_updates", {"checked_at": int(time.time()), "items": updates})
+        return {"status": "success", "items": updates, "checked_at": int(time.time())}
+
+    def list_updates(self, *, refresh: bool = False, offset: int = 0, limit: int = 20) -> dict:
+        cached = get_state(self._pending_namespace, "available_updates", {})
+        if refresh:
+            cached = self.check_updates()
+        elif not isinstance(cached, dict) or not isinstance(cached.get("items"), list):
+            cached = {"items": [], "checked_at": None}
+        items = cached.get("items", [])
+        offset = max(0, int(offset))
+        limit = max(1, min(100, int(limit)))
+        return {"status": "success", "items": items[offset:offset + limit], "total": len(items), "offset": offset, "limit": limit, "checked_at": cached.get("checked_at")}
+
+    def queue_update(self, filename: str) -> dict:
+        with self._lock:
+            source = self._mod_path(filename)
+            cached = get_state(self._pending_namespace, "available_updates", {})
+            update = next((item for item in cached.get("items", []) if item.get("filename") == source.name), None) if isinstance(cached, dict) else None
+            if not update:
+                update = self._check_mod_update(next((item for item in self._scan_entries() if item["filename"] == source.name), {}))
+            if not update:
+                raise BusinessException("未发现该模组的可用更新", status_code=404)
+            response = requests.get(update["download_url"], stream=True, timeout=30, headers={"User-Agent": "PF-MCDR-WebUI mod updater"})
+            response.raise_for_status()
+            temp_path = self.update_dir() / f"{uuid.uuid4().hex}.jar"
+            try:
+                with open(temp_path, "wb") as fp:
+                    for chunk in response.iter_content(1024 * 1024):
+                        if chunk:
+                            fp.write(chunk)
+                with zipfile.ZipFile(temp_path, "r") as zf:
+                    if not zf.namelist():
+                        raise BusinessException("更新下载内容不是有效的 JAR")
+                pending = self._load_pending_operations()
+                self._discard_pending_temp(pending.get(source.name))
+                pending[source.name] = {"action": "update", "queued_at": int(time.time()), "temp_path": str(temp_path.relative_to(self.working_dir())), "target_version": update.get("version"), "download_url": update.get("download_url"), "source": update.get("source")}
+                self._save_pending_operations(pending)
+                if isinstance(cached, dict) and isinstance(cached.get("items"), list):
+                    cached["items"] = [item for item in cached["items"] if item.get("filename") != source.name]
+                    set_state(self._pending_namespace, "available_updates", cached)
+            except Exception:
+                temp_path.unlink(missing_ok=True)
+                raise
+            return {"status": "success", "filename": source.name, "pending": True, "pending_action": "update", "target_version": update.get("version"), "message": "更新已下载并加入待处理列表"}
+
     def cancel_pending(self, filename: str) -> dict:
         with self._lock:
             filename = self._validate_filename(filename)
             pending = self._load_pending_operations()
             if filename not in pending:
                 raise BusinessException("该模组不在待处理列表中", status_code=404)
-            pending.pop(filename, None)
+            operation = pending.pop(filename, None) or {}
+            self._discard_pending_temp(operation)
             self._save_pending_operations(pending)
             return {
                 "status": "success",
@@ -646,6 +873,7 @@ class ModService:
                 raise BusinessException("操作存在兼容性警告，请确认后重试", status_code=409, data={"warnings": warnings})
             if not enabled and self._server_running():
                 pending = self._load_pending_operations()
+                self._discard_pending_temp(pending.get(source.name))
                 pending[source.name] = {"action": "disable", "queued_at": int(time.time())}
                 self._save_pending_operations(pending)
                 return {
@@ -776,6 +1004,7 @@ class ModService:
             source = self._mod_path(filename)
             pending = self._load_pending_operations()
             if source.name.lower().endswith(".jar") and self._server_running():
+                self._discard_pending_temp(pending.get(source.name))
                 pending[source.name] = {"action": "delete", "queued_at": int(time.time())}
                 self._save_pending_operations(pending)
                 return {
