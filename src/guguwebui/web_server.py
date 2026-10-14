@@ -30,6 +30,7 @@ from guguwebui.panel_merge.proxy import ApiProxyDispatchMiddleware
 from guguwebui.panel_merge.routes import router as panel_merge_router
 from guguwebui.PIM import initialize_pim
 from guguwebui.routers.audit_router import router as audit_router
+from guguwebui.routers.backup_router import router as backup_router
 from guguwebui.routers.chat_router import router as chat_router
 from guguwebui.routers.config_router import router as config_router
 from guguwebui.routers.pim_router import router as pim_router
@@ -46,6 +47,7 @@ from guguwebui.services.mod_service import ModService
 from guguwebui.services.ai_service import AIService
 from guguwebui.services.auth_service import AuthService
 from guguwebui.services.chat_service import ChatService
+from guguwebui.services.backup_service import BackupService
 from guguwebui.services.config_service import ConfigService
 from guguwebui.services.file_service import FileService
 from guguwebui.services.pip_service import PipService
@@ -226,6 +228,7 @@ def init_app(server_instance):
     app.state.auth_service = AuthService(server_instance)
     app.state.config_service = ConfigService(server_instance)
     app.state.server_service = ServerService(server_instance, log_watcher)
+    app.state.backup_service = BackupService(server_instance, app.state.server_service)
     app.state.ai_service = AIService(server_instance, app.state.config_service)
     app.state.pip_service = PipService(server_instance)
     app.state.file_service = FileService(server_instance)
@@ -523,6 +526,7 @@ app.include_router(pip_router, prefix="/api") # PIP
 app.include_router(chat_router, prefix="/api") # 聊天
 app.include_router(player_router, prefix="/api") # 玩家管理
 app.include_router(mod_router, prefix="/api") # Minecraft 模组管理
+app.include_router(backup_router, prefix="/api") # 备份插件管理
 app.include_router(audit_router, prefix="/api") # 操作审计
 
 

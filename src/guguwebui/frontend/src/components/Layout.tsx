@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import type { LucideIcon } from 'lucide-react'
 import {
   Activity,
+  Archive,
   Bell,
   Boxes,
   ChartNoAxesCombined,
@@ -288,6 +289,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     { path: '/chat', key: 'page.chat.header_title', icon: MessageSquare },
     { path: '/players', key: 'nav.players', icon: Users },
     { path: '/mods', key: 'nav.mods', icon: Boxes },
+    { path: '/backups', key: 'nav.backups', icon: Archive },
     { path: '/settings', key: 'nav.web_settings', icon: Sliders },
     { path: '/about', key: 'nav.about', icon: Info },
   ]
@@ -295,7 +297,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   // 玩家管理仅对管理员展示
   const visibleNavItems = isAdmin
     ? navItems
-    : navItems.filter((item) => item.path !== '/players' && item.path !== '/mods')
+    : navItems.filter((item) => !['/players', '/mods', '/backups'].includes(item.path))
   const sidebarNavItems = visibleNavItems.filter(
     (item) => item.path !== '/settings' && item.path !== '/about'
   )
