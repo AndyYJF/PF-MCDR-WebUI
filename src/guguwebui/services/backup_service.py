@@ -201,6 +201,21 @@ class BackupService:
             idx += 1
         return f"{int(size)} {units[idx]}" if idx == 0 else f"{size:.2f} {units[idx]}"
 
+    @staticmethod
+    def _creator_label(value: Any) -> str:
+        """Return a stable display label instead of leaking command-source reprs."""
+        if value is None:
+            return ""
+        text = re.sub(r"\s+", " ", str(value)).strip()
+        if not text:
+            return ""
+        if re.search(r"CapturingCommandSource|CommandSource object at|command_source:\s*<", text, re.I):
+            return "WebUI"
+        object_match = re.fullmatch(r"<[^>]+ object at 0x[0-9a-fA-F]+>", text)
+        if object_match:
+            return text[1:text.find(" object at")]
+        return text
+
     def _read_prime(self) -> tuple[list[dict[str, Any]], str | None]:
         path = self._prime_database()
         if not path:
@@ -228,7 +243,7 @@ class BackupService:
                     except (TypeError, ValueError):
                         pass
                 raw_size, stored_size = data.get("file_raw_size_sum"), data.get("file_stored_size_sum")
-                items.append({"provider": "primebackup", "id": str(data.get("id")), "slot": None, "comment": str(data.get("comment") or ""), "created_at": timestamp, "creator": str(data.get("creator") or ""), "size": self._size_text(stored_size), "raw_size": raw_size, "stored_size": stored_size, "file_count": data.get("file_count"), "targets": self._json(data.get("targets"), []), "tags": self._json(data.get("tags"), {})})
+                items.append({"provider": "primebackup", "id": str(data.get("id")), "slot": None, "comment": str(data.get("comment") or ""), "created_at": timestamp, "creator": self._creator_label(data.get("creator")), "size": self._size_text(stored_size), "raw_size": raw_size, "stored_size": stored_size, "file_count": data.get("file_count"), "targets": self._json(data.get("targets"), []), "tags": self._json(data.get("tags"), {})})
             return items, None
         except (sqlite3.Error, OSError) as exc:
             return [], f"无法读取 PrimeBackup 数据库: {exc}"
