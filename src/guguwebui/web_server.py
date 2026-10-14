@@ -332,8 +332,12 @@ def on_server_output(server, info):
         log_watcher.on_server_output(server, info)
 
 
-def on_server_stop(server):
-    """服务器停止后执行运行期间排队的模组禁用操作。"""
+def on_server_stop(server, return_code=None):
+    """服务器停止后执行运行期间排队的模组禁用操作。
+
+    MCDR 的 SERVER_STOP 事件会额外传入服务端进程返回码；保留默认值以
+    兼容旧版 MCDR 或测试代码直接调用该回调的情况。
+    """
     try:
         mod_service = getattr(app.state, "mod_service", None)
         if mod_service is None:
