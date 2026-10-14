@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import datetime
 import time
 
 import pytest
@@ -159,7 +160,10 @@ def test_daily_aggregation(service):
     )
     daily = svc.get_stats_daily("1d")
     assert daily["points"], daily
-    today = daily["points"][-1]
+    # The one-day window may cross midnight on CI runners. Select the bucket
+    # containing the test sessions instead of assuming it is the last bucket.
+    session_date = datetime.datetime.fromtimestamp(start).strftime("%Y-%m-%d")
+    today = next(p for p in daily["points"] if p["date"] == session_date)
     assert today["players"] == 2  # A + B 唯一玩家
     assert today["sessions"] == 3
     assert today["playtime"] > 0

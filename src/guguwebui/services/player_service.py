@@ -654,7 +654,7 @@ class PlayerService:
         """统计时间范围（秒），复用服务器状态页的 RANGE_MAP。"""
         return RANGE_MAP.get(range_key, RANGE_MAP["1h"])
 
-    def _reconcile_open_sessions(self) -> None:
+    def _reconcile_open_sessions(self, now: Optional[float] = None) -> None:
         """兜底：关闭已不在线玩家的开环会话（丢下线事件 / 插件重载 / 服务器崩溃）。"""
         try:
             online = set(self._get_online_players())
@@ -662,7 +662,7 @@ class PlayerService:
             sessions = stats.get("sessions")
             if not isinstance(sessions, list) or not sessions:
                 return
-            now = time.time()
+            now = time.time() if now is None else now
             changed = False
             for s in sessions:
                 if s.get("l") is None and s.get("p") not in online:
@@ -783,7 +783,7 @@ class PlayerService:
         range_seconds = self._range_seconds(range_key)
         end = time.time()
         start = end - range_seconds
-        self._reconcile_open_sessions()
+        self._reconcile_open_sessions(end)
         sessions, active_players = self._active_sessions(start, end, exclude_bots)
 
         # 当前在线（以实时名单为准，排除无 IP 玩家时按历史 IP 证据过滤）
@@ -828,7 +828,7 @@ class PlayerService:
         range_seconds = self._range_seconds(range_key)
         end = time.time()
         start = end - range_seconds
-        self._reconcile_open_sessions()
+        self._reconcile_open_sessions(end)
         sessions, _ = self._active_sessions(start, end, exclude_bots)
         points, _, _ = self._online_curve(sessions, start, end)
         return {
@@ -844,7 +844,7 @@ class PlayerService:
         range_seconds = self._range_seconds(range_key)
         end = time.time()
         start = end - range_seconds
-        self._reconcile_open_sessions()
+        self._reconcile_open_sessions(end)
         sessions, _ = self._active_sessions(start, end, exclude_bots)
 
         day0 = datetime.datetime.fromtimestamp(start).replace(
